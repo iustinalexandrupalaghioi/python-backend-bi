@@ -1,7 +1,6 @@
 Flask
 flask[async]
 python-dotenv
-psycopg2-binary
 openpyxl
 asyncpg
 flask-cors
