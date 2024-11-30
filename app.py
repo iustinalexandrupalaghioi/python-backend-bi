@@ -65,6 +65,7 @@ def calculate_trend(x_data, y_data, trend_type, prediction_points):
     
     return trend_line, future_trend
 
+
 def create_excel_report(dates, sales, trend_line, future_trend, frequency, prediction_points, end_date):
     """Create an Excel workbook with an enhanced sales trend chart."""
     workbook = Workbook()
