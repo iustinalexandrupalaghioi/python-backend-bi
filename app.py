@@ -7,10 +7,11 @@ import logging
 from datetime import datetime, timedelta
 from openpyxl import Workbook
 from openpyxl.chart import LineChart, Reference
+from openpyxl.chart.axis import DateAxis
 from io import BytesIO
 import numpy as np
 from scipy.optimize import curve_fit
-from decimal import Decimal
+
 
 # Set up logging
 logging.basicConfig(level=logging.DEBUG)
@@ -25,14 +26,16 @@ CORS(app)
 DB_URL = os.getenv("DB_URL")
 
 
+# Exponential function for curve fitting
 def exponential_func(x, a, b, c):
     """Exponential function: a * exp(b * x) + c."""
     return a * np.exp(b * x) + c
 
-
+# Trend calculation for different types
 def calculate_trend(x_data, y_data, trend_type, prediction_points):
     """Calculate trend line and future predictions based on the trend type."""
     future_x_data = np.arange(len(x_data) + prediction_points)
+    
     if trend_type == "linear":
         coeffs = np.polyfit(x_data, y_data, 1)
         trend_line = np.polyval(coeffs, x_data)
@@ -59,11 +62,11 @@ def calculate_trend(x_data, y_data, trend_type, prediction_points):
         future_trend = np.concatenate([trend_line, np.repeat(trend_line[-1], prediction_points)])
     else:
         raise ValueError(f"Invalid trendType: {trend_type}")
+    
     return trend_line, future_trend
 
-
 def create_excel_report(dates, sales, trend_line, future_trend, frequency, prediction_points, end_date):
-    """Create an Excel workbook with sales data and trend chart."""
+    """Create an Excel workbook with an enhanced sales trend chart."""
     workbook = Workbook()
     sheet = workbook.active
     sheet.title = "Sales Data"
@@ -88,20 +91,34 @@ def create_excel_report(dates, sales, trend_line, future_trend, frequency, predi
     # Create and add a line chart
     chart = LineChart()
     chart.title = "Sales Trend"
-    chart.x_axis.title = "Date"
+    chart.style = 10
     chart.y_axis.title = "Total Sales"
+    chart.x_axis.title = "Date"
+    chart.style = 11
+    chart.x_axis.number_format = 'yyyy-mm-dd'
+    chart.x_axis.title = "Date"
+    
+    # Define data and labels for the chart
     data = Reference(sheet, min_col=2, min_row=1, max_row=sheet.max_row, max_col=4)
     labels = Reference(sheet, min_col=1, min_row=2, max_row=sheet.max_row)
+
+    # Add data to the chart and set categories
     chart.add_data(data, titles_from_data=True)
     chart.set_categories(labels)
-    sheet.add_chart(chart, "E5")
+
+    # Increase chart size
+    chart.width = 25
+    chart.height = 12
+
+    # Add the chart to the sheet
+    sheet.add_chart(chart, "G3")
 
     # Save workbook to a BytesIO stream
     output = BytesIO()
     workbook.save(output)
     output.seek(0)
     return output
-
+   
 
 @app.get("/api/sales/fetch-sales")
 async def fetch_sales():
@@ -171,6 +188,7 @@ async def fetch_sales():
                 "sale_id": row["sale_id"],
                 "book_title": row["title"],
                 "age_group": row["age_group_name"],
+                "age_group_description": row["description"],
                 "age": row["age"],
                 "gender": row["gender"],
                 "sale_date": row["sale_date"].strftime("%Y-%m-%d"),
@@ -193,6 +211,7 @@ async def fetch_sales():
         await connection.close()
 
 
+# API endpoint to export sales data and generate report
 @app.get("/api/sales/export-sales")
 async def export_sales():
     try:
@@ -207,8 +226,7 @@ async def export_sales():
         max_age = request.args.get("maxAge")
         city = request.args.get("city", "All")
         trend_type = request.args.get("trendType", "linear")
-        frequency = request.args.get("frequency", "Daily")
-        prediction_years = int(request.args.get("predictionYears", 1))
+        frequency = request.args.get("frequency", "Daily").capitalize()  # Normalize capitalization
 
         # Ensure required parameters are present
         if not start_date or not end_date:
@@ -225,15 +243,20 @@ async def export_sales():
         min_age = int(min_age) if min_age else None
         max_age = int(max_age) if max_age else None
 
+        # Validate frequency
+        valid_frequencies = {"Daily": "day", "Monthly": "month", "Yearly": "year"}
+        if frequency not in valid_frequencies:
+            return {"error": f"Invalid frequency. Choose from {list(valid_frequencies.keys())}."}, 400
+
         # Build and execute query
-        query = """
-            SELECT sale_id, title, age_group_name, description, age, gender, sale_date, quantity, total_price AS total_sales, category_name, city_name
+        date_trunc_unit = valid_frequencies[frequency]
+        query = f"""
+            SELECT 
+                DATE_TRUNC('{date_trunc_unit}', sale_date) AS period,
+                SUM(total_price) AS total_sales
             FROM Sales
             LEFT JOIN Clients ON Sales.client_id = Clients.client_id
             LEFT JOIN Age_groups ON Clients.age_group_id = Age_groups.age_group_id
-            LEFT JOIN Books ON Sales.book_id = Books.book_id
-            LEFT JOIN Subcategories ON Books.subcategory_id = Subcategories.subcategory_id
-            LEFT JOIN Categories ON Subcategories.category_id = Categories.category_id
             LEFT JOIN Cities ON Sales.city_id = Cities.city_id
             WHERE sale_date BETWEEN $1 AND $2
         """
@@ -249,43 +272,39 @@ async def export_sales():
             query += f" AND age <= ${len(params) + 1}"
             params.append(max_age)
         if city != "All":
-            query += " AND city_name = $3"
+            query += f" AND city_name = ${len(params) + 1}"
             params.append(city)
 
-        query += " ORDER BY sale_date;"
+        query += " GROUP BY period ORDER BY period;"
         result = await connection.fetch(query, *params)
 
         if not result:
             return {"error": "No sales data found for the specified range."}, 404
 
-        # Prepare the sales data
+        # Prepare the aggregated sales data
         sales_data = [
             {
-                "sale_id": row["sale_id"],
-                "book_title": row["title"],
-                "age_group": row["age_group_name"],
-                "age": row["age"],
-                "gender": row["gender"],
-                "sale_date": row["sale_date"].strftime("%Y-%m-%d"),
-                "quantity": row["quantity"],
-                "total_sales": row["total_sales"],
-                "category": row["category_name"],
-                "city": row["city_name"],
+                "period": row["period"].strftime("%Y-%m-%d"),
+                "total_sales": float(row["total_sales"]),
             }
             for row in result
         ]
 
         # Generate trend line and future predictions
-        dates = [datetime.strptime(sale["sale_date"], "%Y-%m-%d") for sale in sales_data]
-        sales = [float(sale["total_sales"]) for sale in sales_data]
-        float_sales_array = np.array(sales, dtype=np.float64)
-        trend_line, future_trend = calculate_trend(np.arange(len(sales)), sales, trend_type, prediction_years * 12)
+        periods = [row["period"] for row in sales_data]
+        sales = [row["total_sales"] for row in sales_data]
+        trend_line, future_trend = calculate_trend(np.arange(len(sales)), sales, trend_type, len(sales))
 
         # Create Excel file with trend chart
-        excel_output = create_excel_report(dates, float_sales_array, trend_line, future_trend, frequency, prediction_years * 12, end_date)
+        excel_output = create_excel_report(periods, sales, trend_line, future_trend, frequency, len(sales), end_date)
 
         # Send Excel file as response
-        return send_file(excel_output, mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", as_attachment=True, download_name="sales_trend.xlsx")
+        return send_file(
+            excel_output,
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            as_attachment=True,
+            download_name=f"sales_trend_{frequency}.xlsx"
+        )
 
     except Exception as e:
         logging.error(f"Error: {e}")
@@ -293,7 +312,6 @@ async def export_sales():
 
     finally:
         await connection.close()
-
 
 if __name__ == "__main__":
     app.run(debug=True)
