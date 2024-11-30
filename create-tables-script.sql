@@ -115,4 +115,4 @@ INSERT INTO cities (city_name) VALUES
 ALTER TABLE sales
 ADD COLUMN city_id INT REFERENCES cities(city_id) ON DELETE SET NULL;
 
-
+alter table clients add column age NUMERIC

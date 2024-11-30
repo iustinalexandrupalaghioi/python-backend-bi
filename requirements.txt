@@ -5,3 +5,6 @@ openpyxl
 asyncpg
 flask-cors
 logging
+numpy
+scipy
+faker
