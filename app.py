@@ -120,7 +120,7 @@ def create_excel_report(dates, sales, trend_line, future_trend, frequency, predi
     output.seek(0)
     return output
    
-
+# API endpoint to fetch sales
 @app.get("/api/sales/fetch-sales")
 async def fetch_sales():
     try:
@@ -313,6 +313,94 @@ async def export_sales():
 
     finally:
         await connection.close()
+
+# API endpoint to fetch all categories
+@app.get("/api/sales/categories")
+async def fetch_categories():
+    try:
+        # Establish database connection
+        conn = await asyncpg.connect(DB_URL)
+        try:
+            # Fetch all categories
+            query = "SELECT category_id, category_name FROM categories ORDER BY category_name;"
+            rows = await conn.fetch(query)
+            
+            # Convert rows to a list of dictionaries
+            categories = [dict(row) for row in rows]
+            return jsonify(categories)
+        finally:
+            await conn.close()
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# API endpoint to fetch sales per subcategory filtering by category
+@app.get("/api/sales/subcategory-series")
+async def get_sales_per_subcategory():
+    # Get query parameters
+    gender = request.args.get('gender', None)
+    age_min = request.args.get('ageMin', None, type=int)
+    age_max = request.args.get('ageMax', None, type=int)
+    start_date = request.args.get('startDate', None)
+    end_date = request.args.get('endDate', None)
+    category = request.args.get('category', None)
+
+    # Validate date inputs
+    if not start_date or not end_date:
+        return jsonify({"error": "startDate and endDate are required."}), 400
+
+    # Base SQL query
+    base_query = """
+        SELECT sub.subcategory_name AS subcategory_name,
+               COUNT(*) AS TotalSales
+        FROM Sales s
+        INNER JOIN Books b ON s.book_id = b.book_id
+        INNER JOIN Clients c ON s.client_id = c.client_id
+        INNER JOIN Subcategories sub ON b.subcategory_id = sub.subcategory_id
+        INNER JOIN Categories cat ON sub.category_id = cat.category_id
+        WHERE s.sale_date BETWEEN $1 AND $2
+    """
+    params = [start_date, end_date]
+    conditions = []
+
+    # Add gender filter
+    if gender and gender.lower() != "all":
+        conditions.append(f"c.gender = ${len(params) + 1}")
+        params.append(gender)
+
+    # Add age filters
+    if age_min is not None:
+        conditions.append(f"c.age >= ${len(params) + 1}")
+        params.append(age_min)
+
+    if age_max is not None:
+        conditions.append(f"c.age <= ${len(params) + 1}")
+        params.append(age_max)
+
+    # Add category filter
+    if category:
+        conditions.append(f"cat.category_name = ${len(params) + 1}")
+        params.append(category)
+
+    # Append conditions to query
+    if conditions:
+        base_query += " AND " + " AND ".join(conditions)
+
+    # Add grouping and sorting
+    base_query += " GROUP BY sub.subcategory_name ORDER BY sub.subcategory_name;"
+
+    # Execute the query
+    try:
+        # Connect to the database
+        conn = await asyncpg.connect(DB_URL)
+        try:
+            result = await conn.fetch(base_query, *params)
+            return jsonify([dict(row) for row in result])
+        finally:
+            await conn.close()
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 
 if __name__ == "__main__":
     app.run(debug=True)
