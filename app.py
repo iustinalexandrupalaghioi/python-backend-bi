@@ -1,13 +1,13 @@
 from flask import Flask, send_file, request, jsonify
 from flask_cors import CORS
+import matplotlib.pyplot as plt
 import asyncpg
 import os
 from dotenv import load_dotenv
 import logging
 from datetime import datetime, timedelta
 from openpyxl import Workbook
-from openpyxl.chart import LineChart, Reference
-from openpyxl.chart.axis import DateAxis
+from openpyxl.chart import LineChart,BarChart, Reference
 from io import BytesIO
 import numpy as np
 from scipy.optimize import curve_fit
@@ -66,6 +66,8 @@ def calculate_trend(x_data, y_data, trend_type, prediction_points):
     return trend_line, future_trend
 
 
+
+# export highs and lows of sales + trend
 def create_excel_report(dates, sales, trend_line, future_trend, frequency, prediction_points, end_date):
     """Create an Excel workbook with an enhanced sales trend chart."""
     workbook = Workbook()
@@ -337,48 +339,60 @@ async def fetch_categories():
 @app.get("/api/sales/subcategory-series")
 async def get_sales_per_subcategory():
     # Get query parameters
-    gender = request.args.get('gender', None)
-    age_min = request.args.get('ageMin', None, type=int)
-    age_max = request.args.get('ageMax', None, type=int)
-    start_date = request.args.get('startDate', None)
-    end_date = request.args.get('endDate', None)
-    category = request.args.get('category', None)
+    gender = request.args.get("gender", None)
+    age_min = request.args.get("ageMin", None, type=int)
+    age_max = request.args.get("ageMax", None, type=int)
+    start_date = request.args.get("startDate", None)
+    end_date = request.args.get("endDate", None)
+    category = request.args.get("category", None, type=int)
 
-    # Validate date inputs
+    # Validate and parse date inputs
     if not start_date or not end_date:
         return jsonify({"error": "startDate and endDate are required."}), 400
 
+    try:
+        start_date_obj = datetime.strptime(start_date, "%Y-%m-%d").date()
+        end_date_obj = datetime.strptime(end_date, "%Y-%m-%d").date()
+    except ValueError:
+        return jsonify({"error": "Invalid date format. Use YYYY-MM-DD."}), 400
+
     # Base SQL query
     base_query = """
-        SELECT sub.subcategory_name AS subcategory_name,
-               COUNT(*) AS TotalSales
-        FROM Sales s
-        INNER JOIN Books b ON s.book_id = b.book_id
-        INNER JOIN Clients c ON s.client_id = c.client_id
-        INNER JOIN Subcategories sub ON b.subcategory_id = sub.subcategory_id
-        INNER JOIN Categories cat ON sub.category_id = cat.category_id
-        WHERE s.sale_date BETWEEN $1 AND $2
+        SELECT 
+            sub.subcategory_name AS subcategory_name,
+            COUNT(s.sale_id) AS total_sales
+        FROM 
+            sales s
+        INNER JOIN 
+            books b ON s.book_id = b.book_id
+        INNER JOIN 
+            subcategories sub ON b.subcategory_id = sub.subcategory_id
+        INNER JOIN 
+            categories cat ON sub.category_id = cat.category_id
+        INNER JOIN 
+            clients c ON s.client_id = c.client_id
+        WHERE 
+            s.sale_date BETWEEN $1 AND $2
     """
-    params = [start_date, end_date]
+    params = [start_date_obj, end_date_obj]
     conditions = []
 
-    # Add gender filter
+    # Add gender filter if not "All"
     if gender and gender.lower() != "all":
         conditions.append(f"c.gender = ${len(params) + 1}")
         params.append(gender)
 
-    # Add age filters
+    # Add age filters if provided
     if age_min is not None:
         conditions.append(f"c.age >= ${len(params) + 1}")
         params.append(age_min)
-
     if age_max is not None:
         conditions.append(f"c.age <= ${len(params) + 1}")
         params.append(age_max)
 
-    # Add category filter
-    if category:
-        conditions.append(f"cat.category_name = ${len(params) + 1}")
+    # Add category filter if not "All"
+    if category and category != 0:
+        conditions.append(f"cat.category_id = ${len(params) + 1}")
         params.append(category)
 
     # Append conditions to query
@@ -390,17 +404,334 @@ async def get_sales_per_subcategory():
 
     # Execute the query
     try:
-        # Connect to the database
         conn = await asyncpg.connect(DB_URL)
         try:
-            result = await conn.fetch(base_query, *params)
-            return jsonify([dict(row) for row in result])
+            rows = await conn.fetch(base_query, *params)
+            data = [dict(row) for row in rows]
+            logging.debug(f"Sales data from the 1 query: {data}")
+            return jsonify(data)
         finally:
             await conn.close()
     except Exception as e:
+        logging.error(f"Error fetching data: {e}")
         return jsonify({"error": str(e)}), 500
 
+# Export bar chart per subcategory filtering by categories
+@app.get("/api/sales/export-subcategory-bar-chart")
+async def export_sales_per_subcategory_with_bar_chart():
+      # Get query parameters
+    gender = request.args.get("gender", None)
+    age_min = request.args.get("ageMin", None, type=int)
+    age_max = request.args.get("ageMax", None, type=int)
+    start_date = request.args.get("startDate", None)
+    end_date = request.args.get("endDate", None)
+    category = request.args.get("category", None, type=int)
 
+    # Validate and parse date inputs
+    if not start_date or not end_date:
+        return jsonify({"error": "startDate and endDate are required."}), 400
 
+    try:
+        start_date_obj = datetime.strptime(start_date, "%Y-%m-%d").date()
+        end_date_obj = datetime.strptime(end_date, "%Y-%m-%d").date()
+    except ValueError:
+        return jsonify({"error": "Invalid date format. Use YYYY-MM-DD."}), 400
+
+    # Base SQL query
+    base_query = """
+        SELECT 
+            sub.subcategory_name AS subcategory_name,
+            COUNT(s.sale_id) AS total_sales
+        FROM 
+            sales s
+        INNER JOIN 
+            books b ON s.book_id = b.book_id
+        INNER JOIN 
+            subcategories sub ON b.subcategory_id = sub.subcategory_id
+        INNER JOIN 
+            categories cat ON sub.category_id = cat.category_id
+        INNER JOIN 
+            clients c ON s.client_id = c.client_id
+        WHERE 
+            s.sale_date BETWEEN $1 AND $2
+    """
+    params = [start_date_obj, end_date_obj]
+    conditions = []
+
+    # Add gender filter if not "All"
+    if gender and gender.lower() != "all":
+        conditions.append(f"c.gender = ${len(params) + 1}")
+        params.append(gender)
+
+    # Add age filters if provided
+    if age_min is not None:
+        conditions.append(f"c.age >= ${len(params) + 1}")
+        params.append(age_min)
+    if age_max is not None:
+        conditions.append(f"c.age <= ${len(params) + 1}")
+        params.append(age_max)
+
+    # Add category filter if not "All"
+    if category and category != 0:
+        conditions.append(f"cat.category_id = ${len(params) + 1}")
+        params.append(category)
+
+    # Append conditions to query
+    if conditions:
+        base_query += " AND " + " AND ".join(conditions)
+
+    # Add grouping and sorting
+    base_query += " GROUP BY sub.subcategory_name ORDER BY sub.subcategory_name;"
+
+    # Execute the query
+    try:
+        conn = await asyncpg.connect(DB_URL)
+        try:
+            rows = await conn.fetch(base_query, *params)
+            data = [dict(row) for row in rows]
+            logging.debug(f"Sales data from the 2 query: {data}")
+            if not data:
+                logging.error("No sales data found for the specified filters.")
+                return jsonify({"error": "No sales data found for the specified filters."}), 404
+
+            # Prepare data for the Excel file
+            subcategories = [row["subcategory_name"] for row in data]
+            total_sales = [row["total_sales"] for row in data]
+
+            # Debug: Print data to check its structure
+            logging.debug(f"Subcategories: {subcategories}")
+            logging.debug(f"Total Sales: {total_sales}")
+
+            if not subcategories or not total_sales:
+                logging.error("Missing data for subcategories or total_sales.")
+                return jsonify({"error": "Missing data for subcategories or sales."}), 400
+
+            # Call the function to generate the Excel file with a bar chart
+            excel_output = create_excel_with_bar_chart(subcategories, total_sales)
+
+            # Return the Excel file as a response for download
+            return send_file(
+                excel_output,
+                mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                as_attachment=True,
+                download_name="sales_per_subcategory.xlsx"
+            )
+        finally:
+            await conn.close()
+    except Exception as e:
+        logging.error(f"Error fetching data: {e}")
+        return jsonify({"error": str(e)}), 500
+
+# Create bar chart in excel
+def create_excel_with_bar_chart(subcategories, sales):
+    try:
+        # Create a new Excel workbook
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "Sales Data"
+
+        # Add headers to the sheet
+        sheet.append(["Subcategory", "Total Sales"])
+
+        # Add actual data rows (Sales)
+        for subcategory, sale in zip(subcategories, sales):
+            sheet.append([subcategory, sale])
+
+        # Create a Bar chart for the total sales
+        chart = BarChart()
+        chart.title = "Sales Trend"
+        chart.style = 10
+        chart.y_axis.title = "Total Sales"
+        chart.x_axis.title = "Subcategory"
+
+        # Define the data for the chart
+        data = Reference(sheet, min_col=2, min_row=1, max_row=sheet.max_row)
+
+        # Set categories (Subcategories) for the chart
+        chart.set_categories(Reference(sheet, min_col=1, min_row=2, max_row=sheet.max_row))
+
+        # Add the data to the chart
+        chart.add_data(data, titles_from_data=True)
+
+        # Increase chart size
+        chart.width = 25
+        chart.height = 12
+
+        # Position the chart on the sheet
+        sheet.add_chart(chart, "E5")
+
+        # Save the workbook to a BytesIO stream
+        output = BytesIO()
+        workbook.save(output)
+        output.seek(0)
+
+        # Return the Excel file with the chart
+        return output
+    except Exception as e:
+        logging.error(f"Error creating Excel file with chart: {e}")
+        raise e  # Raise the error to be caught in the API controller
+    
+
+@app.get('/api/sales/fetch-event-sales')
+async def fetch_event_sales():
+    try:
+        logging.debug("Establishing database connection...")
+        connection = await asyncpg.connect(dsn=DB_URL)
+
+        # Validate and parse query parameters
+        start_date = request.args.get("startDate")
+        end_date = request.args.get("endDate")
+
+        # Ensure required parameters are present
+        if not start_date or not end_date:
+            return {"error": "startDate and endDate are required."}, 400
+
+        try:
+            start_date = datetime.strptime(start_date, "%Y-%m-%d").date()
+            end_date = datetime.strptime(end_date, "%Y-%m-%d").date()
+            if start_date > end_date:
+                return {"error": "startDate must be before endDate."}, 400
+        except ValueError:
+            return {"error": "Invalid date format. Use YYYY-MM-DD."}, 400
+
+        # Build and execute query to fetch event data and sales
+        query = """
+            SELECT 
+                e.event_name, 
+                e.start_date, 
+                e.end_date, 
+                EXTRACT(DAY FROM (e.end_date - e.start_date)) AS duration,
+                SUM(s.total_price) AS total_sales
+            FROM events e
+            LEFT JOIN sales s ON s.event_id = e.event_id
+            WHERE e.start_date BETWEEN $1 AND $2
+            GROUP BY e.event_id, e.start_date, e.end_date
+            ORDER BY e.start_date;
+        """
+        params = [start_date, end_date]
+        result = await connection.fetch(query, *params)
+
+        if not result:
+            return {"error": "No data found for the specified range."}, 404
+
+        # Prepare data for the plot
+        event_sales_data = [
+            {
+                "event_name": row["event_name"],
+                "duration": int(row["duration"]),
+                "total_sales": float(row["total_sales"])
+            }
+            for row in result
+        ]
+
+        return {"data": event_sales_data}
+
+    except Exception as e:
+        logging.error(f"Error: {e}")
+        return {"error": f"An error occurred: {e}"}, 500
+    
+    
+@app.get('/api/sales/export-event-sales-plot')
+async def export_event_sales_plot():
+    try:
+        logging.debug("Establishing database connection...")
+        connection = await asyncpg.connect(dsn=DB_URL)
+
+        # Validate and parse query parameters
+        start_date = request.args.get("startDate")
+        end_date = request.args.get("endDate")
+
+        if not start_date or not end_date:
+            return {"error": "startDate and endDate are required."}, 400
+
+        try:
+            start_date = datetime.strptime(start_date, "%Y-%m-%d").date()
+            end_date = datetime.strptime(end_date, "%Y-%m-%d").date()
+            if start_date > end_date:
+                return {"error": "startDate must be before endDate."}, 400
+        except ValueError:
+            return {"error": "Invalid date format. Use YYYY-MM-DD."}, 400
+
+        # Build and execute query to fetch event data and sales
+        query = """
+            SELECT 
+                e.event_name, 
+                e.start_date, 
+                e.end_date, 
+                EXTRACT(DAY FROM (e.end_date - e.start_date)) AS duration,
+                SUM(s.total_price) AS total_sales
+            FROM events e
+            LEFT JOIN sales s ON s.event_id = e.event_id
+            WHERE e.start_date BETWEEN $1 AND $2
+            GROUP BY e.event_id, e.start_date, e.end_date
+            ORDER BY e.start_date;
+        """
+        params = [start_date, end_date]
+        result = await connection.fetch(query, *params)
+
+        if not result:
+            return {"error": "No data found for the specified range."}, 404
+
+        # Prepare data for the plot
+        event_sales_data = [
+            {
+                "event_name": row["event_name"],
+                "duration": int(row["duration"]),  # Event duration in days
+                "total_sales": float(row["total_sales"])
+            }
+            for row in result
+        ]
+
+        # Scatter Plot Generation
+        durations = [data["duration"] for data in event_sales_data]
+        sales = [data["total_sales"] for data in event_sales_data]
+
+        fig, ax = plt.subplots()
+        ax.scatter(durations, sales, color='blue')
+        ax.set_xlabel('Event Duration (Days)')
+        ax.set_ylabel('Total Sales')
+        ax.set_title('Event Duration vs. Sales')
+
+        # Save the plot to a BytesIO object
+        img_stream = BytesIO()
+        plt.savefig(img_stream, format='png')
+        img_stream.seek(0)
+
+        # Create Excel file with plot and data
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Event Sales Data"
+
+        # Insert event data into Excel sheet
+        headers = ["Event Name", "Duration (Days)", "Total Sales"]
+        for col_num, header in enumerate(headers, start=1):
+            ws.cell(row=1, column=col_num, value=header)
+
+        for row_num, data in enumerate(event_sales_data, start=2):
+            ws.cell(row=row_num, column=1, value=data["event_name"])
+            ws.cell(row=row_num, column=2, value=data["duration"])
+            ws.cell(row=row_num, column=3, value=data["total_sales"])
+
+        # Insert scatter plot image into Excel
+        img = Image(img_stream)
+        ws.add_image(img, 'E5')
+
+        # Save the Excel file to a BytesIO object
+        excel_stream = BytesIO()
+        wb.save(excel_stream)
+        excel_stream.seek(0)
+
+        # Return the Excel file as a download
+        return send_file(
+            excel_stream,
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            as_attachment=True,
+            download_name="event_sales_data.xlsx"
+        )
+
+    except Exception as e:
+        logging.error(f"Error: {e}")
+        return {"error": f"An error occurred: {e}"}, 500
+    
 if __name__ == "__main__":
     app.run(debug=True)

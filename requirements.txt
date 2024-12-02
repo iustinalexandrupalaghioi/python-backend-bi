@@ -8,3 +8,4 @@ logging
 numpy
 scipy
 faker
+matplotlib
