@@ -27,12 +27,12 @@ CORS(app)
 DB_URL = os.getenv("DB_URL")
 
 
-# Exponential function for curve fitting
+#2. Exponential function for curve fitting
 def exponential_func(x, a, b, c):
     """Exponential function: a * exp(b * x) + c."""
     return a * np.exp(b * x) + c
 
-# Trend calculation for different types
+#2. Trend calculation for different types
 def calculate_trend(x_data, y_data, trend_type, prediction_points):
     """Calculate trend line and future predictions based on the trend type."""
     future_x_data = np.arange(len(x_data) + prediction_points)
@@ -67,8 +67,7 @@ def calculate_trend(x_data, y_data, trend_type, prediction_points):
     return trend_line, future_trend
 
 
-
-# export highs and lows of sales + trend
+#2. export highs and lows of sales + trend
 def create_excel_report(dates, sales, trend_line, future_trend, frequency, prediction_points, end_date):
     """Create an Excel workbook with an enhanced sales trend chart."""
     workbook = Workbook()
@@ -123,7 +122,8 @@ def create_excel_report(dates, sales, trend_line, future_trend, frequency, predi
     output.seek(0)
     return output
    
-# API endpoint to fetch sales
+   
+#2. API endpoint to fetch sales
 @app.get("/api/sales/fetch-sales")
 async def fetch_sales():
     try:
@@ -215,7 +215,7 @@ async def fetch_sales():
         await connection.close()
 
 
-# API endpoint to export sales data and generate report
+#2. API endpoint to export sales data and generate report
 @app.get("/api/sales/export-sales")
 async def export_sales():
     try:
@@ -317,7 +317,7 @@ async def export_sales():
     finally:
         await connection.close()
 
-# API endpoint to fetch all categories
+#1. API endpoint to fetch all categories
 @app.get("/api/sales/categories")
 async def fetch_categories():
     try:
@@ -336,7 +336,7 @@ async def fetch_categories():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# API endpoint to fetch sales per subcategory filtering by category
+#1. API endpoint to fetch sales per subcategory filtering by category
 @app.get("/api/sales/subcategory-series")
 async def get_sales_per_subcategory():
     # Get query parameters
@@ -417,7 +417,7 @@ async def get_sales_per_subcategory():
         logging.error(f"Error fetching data: {e}")
         return jsonify({"error": str(e)}), 500
 
-# Export bar chart per subcategory filtering by categories
+#1. Export bar chart per subcategory filtering by categories
 @app.get("/api/sales/export-subcategory-bar-chart")
 async def export_sales_per_subcategory_with_bar_chart():
       # Get query parameters
@@ -516,7 +516,7 @@ async def export_sales_per_subcategory_with_bar_chart():
         logging.error(f"Error fetching data: {e}")
         return jsonify({"error": str(e)}), 500
 
-# Create bar chart in excel
+#1. Create bar chart in excel
 def create_excel_with_bar_chart(subcategories, sales):
     try:
         # Create a new Excel workbook
@@ -708,8 +708,8 @@ async def export_event_sales_plot():
             ws.cell(row=row_num, column=3, value=data["total_sales"])
 
         # Insert scatter plot image into Excel
-        img = Image(img_stream)
-        ws.add_image(img, 'E5')
+        # img = Image(img_stream)
+        # ws.add_image(img, 'E5')
 
         # Save the Excel file to a BytesIO object
         excel_stream = BytesIO()
