@@ -1,3 +1,4 @@
+from turtle import title
 from flask import Flask, send_file, request, jsonify
 from flask_cors import CORS
 import matplotlib.pyplot as plt
@@ -408,7 +409,7 @@ async def get_sales_per_subcategory():
         try:
             rows = await conn.fetch(base_query, *params)
             data = [dict(row) for row in rows]
-            logging.debug(f"Sales data from the 1 query: {data}")
+            logging.debug(f"Executing query 1: {base_query} with params: {params}")
             return jsonify(data)
         finally:
             await conn.close()
@@ -489,19 +490,12 @@ async def export_sales_per_subcategory_with_bar_chart():
         try:
             rows = await conn.fetch(base_query, *params)
             data = [dict(row) for row in rows]
-            logging.debug(f"Sales data from the 2 query: {data}")
-            if not data:
-                logging.error("No sales data found for the specified filters.")
-                return jsonify({"error": "No sales data found for the specified filters."}), 404
+            logging.debug(f"Executing query: {base_query} with params: {params}")
 
             # Prepare data for the Excel file
             subcategories = [row["subcategory_name"] for row in data]
             total_sales = [row["total_sales"] for row in data]
-
-            # Debug: Print data to check its structure
-            logging.debug(f"Subcategories: {subcategories}")
-            logging.debug(f"Total Sales: {total_sales}")
-
+            
             if not subcategories or not total_sales:
                 logging.error("Missing data for subcategories or total_sales.")
                 return jsonify({"error": "Missing data for subcategories or sales."}), 400
@@ -539,26 +533,27 @@ def create_excel_with_bar_chart(subcategories, sales):
 
         # Create a Bar chart for the total sales
         chart = BarChart()
-        chart.title = "Sales Trend"
+        chart.title = "Sales"
         chart.style = 10
         chart.y_axis.title = "Total Sales"
         chart.x_axis.title = "Subcategory"
 
-        # Define the data for the chart
+         # Define the data for the chart (exclude header row for data)
         data = Reference(sheet, min_col=2, min_row=1, max_row=sheet.max_row)
 
-        # Set categories (Subcategories) for the chart
-        chart.set_categories(Reference(sheet, min_col=1, min_row=2, max_row=sheet.max_row))
+        # Define the categories for the chart (Subcategories)
+        categories = Reference(sheet, min_col=1, min_row=2, max_row=sheet.max_row)
 
-        # Add the data to the chart
+        # Add the data and categories to the chart
         chart.add_data(data, titles_from_data=True)
+        chart.set_categories(categories)
 
         # Increase chart size
         chart.width = 25
         chart.height = 12
 
         # Position the chart on the sheet
-        sheet.add_chart(chart, "E5")
+        sheet.add_chart(chart, "G5")
 
         # Save the workbook to a BytesIO stream
         output = BytesIO()
