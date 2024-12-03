@@ -567,7 +567,7 @@ def create_excel_with_bar_chart(subcategories, sales):
         raise e  # Raise the error to be caught in the API controller
     
 
-# API endpoint to fetch sales data for event linking, filter by category
+#3. API endpoint to fetch sales data for event linking, filter by category
 @app.get('/api/sales/fetch-event-sales')
 async def fetch_event_sales():
     try:
