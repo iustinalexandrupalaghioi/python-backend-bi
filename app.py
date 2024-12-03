@@ -567,6 +567,7 @@ def create_excel_with_bar_chart(subcategories, sales):
         raise e  # Raise the error to be caught in the API controller
     
 
+# API endpoint to fetch sales data for event linking, filter by category
 @app.get('/api/sales/fetch-event-sales')
 async def fetch_event_sales():
     try:
@@ -576,6 +577,7 @@ async def fetch_event_sales():
         # Validate and parse query parameters
         start_date = request.args.get("startDate")
         end_date = request.args.get("endDate")
+        category = request.args.get("category", None, type=int)
 
         # Ensure required parameters are present
         if not start_date or not end_date:
@@ -590,31 +592,66 @@ async def fetch_event_sales():
             return {"error": "Invalid date format. Use YYYY-MM-DD."}, 400
 
         # Build and execute query to fetch event data and sales
-        query = """
+        base_query = """
             SELECT 
-                e.event_name, 
+                e.event_name,
+                cat.category_name as category_name,
                 e.start_date, 
                 e.end_date, 
-                EXTRACT(DAY FROM (e.end_date - e.start_date)) AS duration,
-                SUM(s.total_price) AS total_sales
+                CAST(e.end_date - e.start_date AS INTEGER) + 1 AS duration,
+                SUM(s.quantity) AS total_quantity_sold,
+                SUM(s.total_price) AS total_sales,
+                COUNT(DISTINCT s.book_id) AS unique_books_sold,
+
+                CASE 
+                    WHEN (e.end_date - e.start_date) > 0 
+                    THEN SUM(s.total_price) / (e.end_date - e.start_date) 
+                    ELSE SUM(s.total_price)
+                END AS average_sales_per_day,
+                
+                CASE 
+                    WHEN (e.end_date - e.start_date) > 0 
+                    THEN SUM(s.quantity) / (e.end_date - e.start_date) 
+                    ELSE SUM(s.quantity)
+                END AS average_books_sold_per_day
             FROM events e
             LEFT JOIN sales s ON s.event_id = e.event_id
+            INNER JOIN books b ON b.book_id = s.book_id
+            INNER JOIN subcategories sub ON b.subcategory_id = sub.subcategory_id
+            LEFT JOIN categories cat ON sub.category_id = cat.category_id
             WHERE e.start_date BETWEEN $1 AND $2
-            GROUP BY e.event_id, e.start_date, e.end_date
+        """
+
+        # Add category filter dynamically
+        params = [start_date, end_date]
+        if category and category != 0:
+            base_query += " AND cat.category_id = $3"
+            params.append(category)
+
+        # Group and order results
+        base_query += """
+            GROUP BY e.event_id, e.start_date, e.end_date, category_name
             ORDER BY e.start_date;
         """
-        params = [start_date, end_date]
-        result = await connection.fetch(query, *params)
+
+        result = await connection.fetch(base_query, *params)
 
         if not result:
             return {"error": "No data found for the specified range."}, 404
 
-        # Prepare data for the plot
+        # Prepare data for the response
         event_sales_data = [
             {
                 "event_name": row["event_name"],
+                "category_name": row["category_name"],
+                "start_date": row["start_date"],
+                "end_date": row["end_date"],
                 "duration": int(row["duration"]),
-                "total_sales": float(row["total_sales"])
+                "average_sales_per_day": float(row["average_sales_per_day"]),
+                "average_books_sold_per_day": int(row["average_books_sold_per_day"]),
+                "total_sales": float(row["total_sales"]),
+                "total_quantity_sold": int(row["total_quantity_sold"]),
+                "unique_books_sold": int(row["unique_books_sold"])
             }
             for row in result
         ]
