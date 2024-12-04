@@ -8,7 +8,8 @@ from dotenv import load_dotenv
 import logging
 from datetime import datetime, timedelta
 from openpyxl import Workbook
-from openpyxl.chart import LineChart,BarChart, Reference
+from openpyxl.chart import LineChart, BarChart, Reference
+from openpyxl.chart.layout import Layout, ManualLayout
 from io import BytesIO
 import numpy as np
 from scipy.optimize import curve_fit
@@ -663,7 +664,7 @@ async def fetch_event_sales():
         return {"error": f"An error occurred: {e}"}, 500
     
     
-@app.get('/api/sales/export-event-sales-plot')
+@app.get('/api/sales/export-event-sales')
 async def export_event_sales_plot():
     try:
         logging.debug("Establishing database connection...")
@@ -672,7 +673,9 @@ async def export_event_sales_plot():
         # Validate and parse query parameters
         start_date = request.args.get("startDate")
         end_date = request.args.get("endDate")
+        category = request.args.get("category", None, type=int)
 
+        # Ensure required parameters are present
         if not start_date or not end_date:
             return {"error": "startDate and endDate are required."}, 400
 
@@ -685,77 +688,75 @@ async def export_event_sales_plot():
             return {"error": "Invalid date format. Use YYYY-MM-DD."}, 400
 
         # Build and execute query to fetch event data and sales
-        query = """
+        base_query = """
             SELECT 
-                e.event_name, 
+                e.event_name,
+                cat.category_name as category_name,
                 e.start_date, 
                 e.end_date, 
-                EXTRACT(DAY FROM (e.end_date - e.start_date)) AS duration,
-                SUM(s.total_price) AS total_sales
+                CAST(e.end_date - e.start_date AS INTEGER) + 1 AS duration,
+                SUM(s.quantity) AS total_quantity_sold,
+                SUM(s.total_price) AS total_sales,
+                COUNT(DISTINCT s.book_id) AS unique_books_sold,
+
+                CASE 
+                    WHEN (e.end_date - e.start_date) > 0 
+                    THEN SUM(s.total_price) / (e.end_date - e.start_date) 
+                    ELSE SUM(s.total_price)
+                END AS average_sales_per_day,
+                
+                CASE 
+                    WHEN (e.end_date - e.start_date) > 0 
+                    THEN SUM(s.quantity) / (e.end_date - e.start_date) 
+                    ELSE SUM(s.quantity)
+                END AS average_books_sold_per_day
             FROM events e
             LEFT JOIN sales s ON s.event_id = e.event_id
+            INNER JOIN books b ON b.book_id = s.book_id
+            INNER JOIN subcategories sub ON b.subcategory_id = sub.subcategory_id
+            LEFT JOIN categories cat ON sub.category_id = cat.category_id
             WHERE e.start_date BETWEEN $1 AND $2
-            GROUP BY e.event_id, e.start_date, e.end_date
+        """
+
+        # Add category filter dynamically
+        params = [start_date, end_date]
+        if category and category != 0:
+            base_query += " AND cat.category_id = $3"
+            params.append(category)
+
+        # Group and order results
+        base_query += """
+            GROUP BY e.event_id, e.start_date, e.end_date, category_name
             ORDER BY e.start_date;
         """
-        params = [start_date, end_date]
-        result = await connection.fetch(query, *params)
+
+        result = await connection.fetch(base_query, *params)
 
         if not result:
             return {"error": "No data found for the specified range."}, 404
 
-        # Prepare data for the plot
+        # Prepare data for the response
         event_sales_data = [
             {
                 "event_name": row["event_name"],
-                "duration": int(row["duration"]),  # Event duration in days
-                "total_sales": float(row["total_sales"])
+                "category_name": row["category_name"],
+                "start_date": row["start_date"],
+                "end_date": row["end_date"],
+                "duration": int(row["duration"]),
+                "average_sales_per_day": float(row["average_sales_per_day"]),
+                "average_books_sold_per_day": int(row["average_books_sold_per_day"]),
+                "total_sales": float(row["total_sales"]),
+                "total_quantity_sold": int(row["total_quantity_sold"]),
+                "unique_books_sold": int(row["unique_books_sold"])
             }
             for row in result
         ]
-
-        # Scatter Plot Generation
-        durations = [data["duration"] for data in event_sales_data]
-        sales = [data["total_sales"] for data in event_sales_data]
-
-        fig, ax = plt.subplots()
-        ax.scatter(durations, sales, color='blue')
-        ax.set_xlabel('Event Duration (Days)')
-        ax.set_ylabel('Total Sales')
-        ax.set_title('Event Duration vs. Sales')
-
-        # Save the plot to a BytesIO object
-        img_stream = BytesIO()
-        plt.savefig(img_stream, format='png')
-        img_stream.seek(0)
-
-        # Create Excel file with plot and data
-        wb = Workbook()
-        ws = wb.active
-        ws.title = "Event Sales Data"
-
-        # Insert event data into Excel sheet
-        headers = ["Event Name", "Duration (Days)", "Total Sales"]
-        for col_num, header in enumerate(headers, start=1):
-            ws.cell(row=1, column=col_num, value=header)
-
-        for row_num, data in enumerate(event_sales_data, start=2):
-            ws.cell(row=row_num, column=1, value=data["event_name"])
-            ws.cell(row=row_num, column=2, value=data["duration"])
-            ws.cell(row=row_num, column=3, value=data["total_sales"])
-
-        # Insert scatter plot image into Excel
-        # img = Image(img_stream)
-        # ws.add_image(img, 'E5')
-
-        # Save the Excel file to a BytesIO object
-        excel_stream = BytesIO()
-        wb.save(excel_stream)
-        excel_stream.seek(0)
+        
+        excel_output = create_separate_charts_with_duration(event_sales_data, "event_sales_data.xlsx")
 
         # Return the Excel file as a download
         return send_file(
-            excel_stream,
+            excel_output,
             mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             as_attachment=True,
             download_name="event_sales_data.xlsx"
@@ -764,6 +765,167 @@ async def export_event_sales_plot():
     except Exception as e:
         logging.error(f"Error: {e}")
         return {"error": f"An error occurred: {e}"}, 500
+  
+def create_separate_charts_with_duration(data, output_file):
+    # Create a new workbook and worksheet
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Event Sales"
+
+    # Add headers including Duration
+    headers = [
+        "Event Name", "Total Sales", "Total Quantity Sold", 
+        "Average Sales Per Day", "Average Books Sold Per Day", "Unique Books Sold", "Duration (Days)"
+    ]
+    ws.append(headers)
+
+    # Add data to the sheet, including Duration
+    for entry in data:
+        ws.append([
+            entry["event_name"],
+            entry["total_sales"],
+            entry["total_quantity_sold"],
+            entry["average_sales_per_day"],
+            entry["average_books_sold_per_day"],
+            entry["unique_books_sold"],
+            entry["duration"]
+        ])
+
+    # Chart 1: Total Sales and Average Sales Per Day
+    # Create a Bar Chart (for Total Sales)
+    bar_chart1 = BarChart()
+    bar_chart1.type = "col"  # Clustered column chart
+    bar_chart1.title = "Total Sales and Average Sales Per Day"
+    bar_chart1.x_axis.title = "Events"
+    bar_chart1.y_axis.title = "Values"
     
+    # Define data and categories for the Bar Chart
+    bar_data_ref1 = Reference(ws, min_col=2, max_col=2, min_row=1, max_row=len(data) + 1)
+    categories_ref1 = Reference(ws, min_col=1, min_row=2, max_row=len(data) + 1)
+    
+    bar_chart1.add_data(bar_data_ref1, titles_from_data=True)
+    bar_chart1.set_categories(categories_ref1)
+
+    # Create a Line Chart (for Average Sales Per Day)
+    line_chart1 = LineChart()
+    line_data_ref1 = Reference(ws, min_col=4, max_col=4, min_row=1, max_row=len(data) + 1)
+    line_chart1.add_data(line_data_ref1, titles_from_data=True)
+    line_chart1.y_axis.axId = 200  # Assign a new Y-axis for the line chart
+    line_chart1.x_axis = bar_chart1.x_axis  # Share the same X-axis with the bar chart
+    line_chart1.title = None  # No separate title for the line chart
+
+    # Combine the charts
+    bar_chart1.y_axis.crosses = "autoZero"  # Keep bar chart Y-axis on the left
+    bar_chart1 += line_chart1  # Add the line chart to the bar chart
+
+    # Add the first chart to the worksheet
+    ws.add_chart(bar_chart1, "H3")
+
+    # Chart 2: Total Quantity Sold and Average Books Sold Per Day
+    # Create a Bar Chart (for Total Quantity Sold)
+    bar_chart2 = BarChart()
+    bar_chart2.type = "col"  # Clustered column chart
+    bar_chart2.title = "Total Quantity Sold and Average Books Sold Per Day"
+    bar_chart2.x_axis.title = "Events"
+    bar_chart2.y_axis.title = "Values"
+    
+    # Define data and categories for the Bar Chart
+    bar_data_ref2 = Reference(ws, min_col=3, max_col=3, min_row=1, max_row=len(data) + 1)
+    categories_ref2 = Reference(ws, min_col=1, min_row=2, max_row=len(data) + 1)
+
+    bar_chart2.add_data(bar_data_ref2, titles_from_data=True)
+    bar_chart2.set_categories(categories_ref2)
+
+    # Create a Line Chart (for Average Books Sold Per Day)
+    line_chart2 = LineChart()
+    line_data_ref2 = Reference(ws, min_col=5, max_col=5, min_row=1, max_row=len(data) + 1)
+    line_chart2.add_data(line_data_ref2, titles_from_data=True)
+    line_chart2.y_axis.axId = 300  # Assign a new Y-axis for the line chart
+    line_chart2.x_axis = bar_chart2.x_axis  # Share the same X-axis with the bar chart
+    line_chart2.title = None  # No separate title for the line chart
+
+    # Combine the charts
+    bar_chart2.y_axis.crosses = "autoZero"  # Keep bar chart Y-axis on the left
+    bar_chart2 += line_chart2  # Add the line chart to the bar chart
+
+    # Add the second chart to the worksheet
+    ws.add_chart(bar_chart2, "H30")
+
+    # Save the workbook
+    wb.save(output_file)
+    print(f"Excel file '{output_file}' with separate charts and duration created successfully!")
+    return output_file
+def create_excel_with_stacked_chart(data, output_file):
+    try:
+        # Create a new workbook and select the active sheet
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Event Sales"
+
+        # Add headers
+        headers = [
+            "Event Name",
+            "Category Name",
+            "Start Date",
+            "End Date",
+            "Duration (Days)",
+            "Average Sales Per Day",
+            "Average Books Sold Per Day",
+            "Total Sales",
+            "Total Quantity Sold",
+            "Unique Books Sold",
+        ]
+        ws.append(headers)
+
+        # Add data to the sheet
+        for entry in data:
+            ws.append([
+                entry["event_name"],
+                entry["category_name"],
+                entry["start_date"],
+                entry["end_date"],
+                entry["duration"],
+                entry["average_sales_per_day"],
+                entry["average_books_sold_per_day"],
+                entry["total_sales"],
+                entry["total_quantity_sold"],
+                entry["unique_books_sold"],
+            ])
+
+        # Create a 100% stacked column chart
+        chart = BarChart()
+        chart.type = "col"  # Specifies a column chart
+        chart.grouping = "percentStacked"  # Sets the chart to 100% stacked mode
+        chart.title = "100% Stacked Event Sales Analysis"
+        chart.x_axis.title = "Events"
+        chart.y_axis.title = "Percentage Contribution"
+
+        # Define data for the chart
+        data_ref = Reference(ws, min_col=6, max_col=9, min_row=1, max_row=len(data) + 1)
+        categories_ref = Reference(ws, min_col=1, min_row=2, max_row=len(data) + 1)
+
+        chart.add_data(data_ref, titles_from_data=True)
+        chart.set_categories(categories_ref)
+        
+        chart.width = 25
+        chart.height = 15
+        chart.gapWidth = 300
+
+        # Position the chart on the sheet
+        ws.add_chart(chart, "L3")
+
+        # Save the workbook
+        wb.save(output_file)
+        print(f"Excel file '{output_file}' with 100% stacked chart created successfully!")
+        return output_file
+
+    except Exception as e:
+        print(f"Error while creating Excel file: {e}")
+        return None
+
+    except Exception as e:
+        print(f"An error occurred: {e}")
+
+  
 if __name__ == "__main__":
     app.run(debug=True)
