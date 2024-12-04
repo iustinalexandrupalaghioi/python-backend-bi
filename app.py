@@ -1,7 +1,6 @@
-from turtle import title
+from xml.etree.ElementTree import tostring
 from flask import Flask, send_file, request, jsonify
 from flask_cors import CORS
-import matplotlib.pyplot as plt
 import asyncpg
 import os
 from dotenv import load_dotenv
@@ -9,7 +8,7 @@ import logging
 from datetime import datetime, timedelta
 from openpyxl import Workbook
 from openpyxl.chart import LineChart, BarChart, Reference
-from openpyxl.chart.layout import Layout, ManualLayout
+from openpyxl.drawing.text import  ParagraphProperties, CharacterProperties
 from io import BytesIO
 import numpy as np
 from scipy.optimize import curve_fit
@@ -28,6 +27,130 @@ CORS(app)
 DB_URL = os.getenv("DB_URL")
 
 
+
+#T1. Fetch sales trend and estimate sales trend when applying for discounts
+@app.get("/api/sales/fetch-sales-trend")
+async def fetch_sales_with_discounts():
+    try:
+        logging.debug("Establishing database connection...")
+        connection = await asyncpg.connect(dsn=DB_URL)
+
+        # Validate and parse query parameters
+        start_date = request.args.get("startDate")
+        end_date = request.args.get("endDate")
+        gender = request.args.get("gender", "All")
+        min_age = request.args.get("ageMin")
+        max_age = request.args.get("ageMax")
+        city = request.args.get("city", "All")
+        trend_type = request.args.get("trendType", "linear")
+        frequency = request.args.get("frequency", "Daily").capitalize()  # Normalize capitalization
+        prediction_points = int(request.args.get("predictionPoints", 0))
+
+        # Ensure required parameters are present
+        if not start_date or not end_date:
+            return {"error": "startDate and endDate are required."}, 400
+
+        try:
+            start_date = datetime.strptime(start_date, "%Y-%m-%d").date()
+            end_date = datetime.strptime(end_date, "%Y-%m-%d").date()
+            if start_date > end_date:
+                return {"error": "startDate must be before endDate."}, 400
+        except ValueError:
+            return {"error": "Invalid date format. Use YYYY-MM-DD."}, 400
+
+        # Handle min_age and max_age with default to None
+        min_age = int(min_age) if min_age and min_age.isdigit() else None
+        max_age = int(max_age) if max_age and max_age.isdigit() else None
+
+        # Validate frequency
+        valid_frequencies = {"Daily": "day", "Monthly": "month", "Yearly": "year"}
+        if frequency not in valid_frequencies:
+            return {"error": f"Invalid frequency. Choose from {list(valid_frequencies.keys())}."}, 400
+
+        # Build the query to fetch sales data with discounts
+        date_trunc_unit = valid_frequencies[frequency]
+        query = f"""
+            SELECT 
+                DATE_TRUNC('{date_trunc_unit}', sale_date) AS period,
+                discount_name,
+                discount_rate,
+                SUM(total_price) AS total_sales
+            FROM Sales
+            LEFT JOIN Discounts ON Sales.discount_id = Discounts.discount_id
+            LEFT JOIN Clients ON Sales.client_id = Clients.client_id
+            LEFT JOIN Cities ON Sales.city_id = Cities.city_id
+            WHERE sale_date BETWEEN $1 AND $2 AND sales.discount_id IS NOT NULL
+        """
+        params = [start_date, end_date]
+
+        if gender != "All":
+            query += " AND gender = $3"
+            params.append(gender)
+        if min_age is not None:
+            query += f" AND age >= ${len(params) + 1}"
+            params.append(min_age)
+        if max_age is not None:
+            query += f" AND age <= ${len(params) + 1}"
+            params.append(max_age)
+        if city != "All":
+            query += f" AND city_name = ${len(params) + 1}"
+            params.append(city)
+
+        query += " GROUP BY period, discount_name, discount_rate ORDER BY period, discount_name;"
+
+        result = await connection.fetch(query, *params)
+
+        if not result:
+            return {"error": "No sales data found with discounts for the specified range."}, 404
+
+        # Prepare sales data, grouped by discount
+        sales_data = {}
+        for row in result:
+            discount = float(row["discount_rate"])
+            friendly_name = row["discount_name"] + ": " + str(discount)
+            sale_date = row["period"].strftime("%Y-%m-%d")
+            total_sales = float(row["total_sales"])
+            if discount not in sales_data:
+                sales_data[discount] = {"dates": [], "sales": []}
+            sales_data[discount]["dates"].append(sale_date)
+            sales_data[discount]["sales"].append(total_sales)
+
+        # Prepare trend data (optional)
+        trend_data = {}
+        for friendly_name, data in sales_data.items():
+            trend_line = []
+            future_trend = []
+
+            # Ensure trend_type and prediction_points are set correctly
+            if trend_type and prediction_points > 0:
+                x_data = np.arange(len(data["dates"]))  # X axis: [0, 1, 2, ..., len(data["dates"])-1]
+                y_data = np.array(data["sales"])        # Y axis: sales data
+
+                # Calculate trend line and future trend
+                trend_line, future_trend = calculate_trend(x_data, y_data, trend_type, prediction_points)
+
+            # Prepare the trend data, ensuring no out-of-bounds access occurs
+            trend_data[friendly_name] = {
+                "trend": [{"date": data["dates"][i], "trend_value": trend_line[i]} for i in range(len(trend_line))] if trend_line.any() else [],
+                "future_trend": [
+                    {"date": (end_date + timedelta(days=i)).strftime("%Y-%m-%d"), "trend_value": future_trend[i]}
+                    for i in range(len(future_trend))  # Avoid accessing out-of-bounds
+                ] if future_trend.any() else []
+            }
+
+        return {"trend_data": trend_data}
+
+    except Exception as e:
+        logging.error(f"Error: {e}")
+        return {"error": f"An error occurred while processing the request: {e}"}, 500
+
+    finally:
+        await connection.close()
+
+
+        
+        
+
 #2. Exponential function for curve fitting
 def exponential_func(x, a, b, c):
     """Exponential function: a * exp(b * x) + c."""
@@ -43,7 +166,7 @@ def calculate_trend(x_data, y_data, trend_type, prediction_points):
         trend_line = np.polyval(coeffs, x_data)
         future_trend = np.polyval(coeffs, future_x_data)
     elif trend_type == "exponential":
-        params, _ = curve_fit(exponential_func, x_data, y_data, p0=(1, 0.01, 1))
+        params, _ = curve_fit(exponential_func, x_data, y_data, p0=(1, 0.01, 1), maxfev=2000)
         trend_line = exponential_func(x_data, *params)
         future_trend = exponential_func(future_x_data, *params)
     elif trend_type == "polynomial":
@@ -94,11 +217,10 @@ def create_excel_report(dates, sales, trend_line, future_trend, frequency, predi
 
     # Create and add a line chart
     chart = LineChart()
-    chart.title = "Sales Trend"
-    chart.style = 10
-    chart.y_axis.title = "Total Sales"
+    chart.title = "Sales trend"
+    chart.y_axis.title = "Total sales"
     chart.x_axis.title = "Date"
-    chart.style = 11
+    chart.style = 10
     chart.x_axis.number_format = 'yyyy-mm-dd'
     chart.x_axis.title = "Date"
     
@@ -317,6 +439,9 @@ async def export_sales():
 
     finally:
         await connection.close()
+
+
+
 
 #1. API endpoint to fetch all categories
 @app.get("/api/sales/categories")
@@ -568,6 +693,10 @@ def create_excel_with_bar_chart(subcategories, sales):
         raise e  # Raise the error to be caught in the API controller
     
 
+
+
+
+
 #3. API endpoint to fetch sales data for event linking, filter by category
 @app.get('/api/sales/fetch-event-sales')
 async def fetch_event_sales():
@@ -645,6 +774,7 @@ async def fetch_event_sales():
             {
                 "event_name": row["event_name"],
                 "category_name": row["category_name"],
+                "friendly_name": row["category_name"] + " at " + row["event_name"],
                 "start_date": row["start_date"],
                 "end_date": row["end_date"],
                 "duration": int(row["duration"]),
@@ -663,7 +793,7 @@ async def fetch_event_sales():
         logging.error(f"Error: {e}")
         return {"error": f"An error occurred: {e}"}, 500
     
-    
+#3. API endpoint to export sales per event charts
 @app.get('/api/sales/export-event-sales')
 async def export_event_sales_plot():
     try:
@@ -740,6 +870,7 @@ async def export_event_sales_plot():
             {
                 "event_name": row["event_name"],
                 "category_name": row["category_name"],
+                "friendly_name": row["category_name"] + " at " + row["event_name"],
                 "start_date": row["start_date"],
                 "end_date": row["end_date"],
                 "duration": int(row["duration"]),
@@ -765,7 +896,8 @@ async def export_event_sales_plot():
     except Exception as e:
         logging.error(f"Error: {e}")
         return {"error": f"An error occurred: {e}"}, 500
-  
+
+#3. Create bar chart + line chart for sales per event analysis
 def create_separate_charts_with_duration(data, output_file):
     # Create a new workbook and worksheet
     wb = Workbook()
@@ -774,8 +906,8 @@ def create_separate_charts_with_duration(data, output_file):
 
     # Add headers including Duration
     headers = [
-        "Event Name", "Total Sales", "Total Quantity Sold", 
-        "Average Sales Per Day", "Average Books Sold Per Day", "Unique Books Sold", "Duration (Days)"
+        "Event name","Category name", "Friendly name", "Total sales", "Total quantity sold", 
+        "Average sales per day", "Average books sold per day", "Unique books sold", "Duration (days)"
     ]
     ws.append(headers)
 
@@ -783,6 +915,8 @@ def create_separate_charts_with_duration(data, output_file):
     for entry in data:
         ws.append([
             entry["event_name"],
+            entry["category_name"],
+            entry["friendly_name"],
             entry["total_sales"],
             entry["total_quantity_sold"],
             entry["average_sales_per_day"],
@@ -795,136 +929,82 @@ def create_separate_charts_with_duration(data, output_file):
     # Create a Bar Chart (for Total Sales)
     bar_chart1 = BarChart()
     bar_chart1.type = "col"  # Clustered column chart
-    bar_chart1.title = "Total Sales and Average Sales Per Day"
-    bar_chart1.x_axis.title = "Events"
+    bar_chart1.title = "Total sales and average sales per day"
+    bar_chart1.x_axis.title = "Category sales at events"
     bar_chart1.y_axis.title = "Values"
-    
+    bar_chart1.width = 30
+    bar_chart1.height = 15
+    bar_chart1.gapWidth = 500
+    bar_chart1.style = 10
+    bar_chart1.x_axis.majorGridlines = None  # Remove gridlines
+
     # Define data and categories for the Bar Chart
-    bar_data_ref1 = Reference(ws, min_col=2, max_col=2, min_row=1, max_row=len(data) + 1)
-    categories_ref1 = Reference(ws, min_col=1, min_row=2, max_row=len(data) + 1)
+    bar_data_ref1 = Reference(ws, min_col=4, max_col=4, min_row=1, max_row=len(data) + 1)
+    categories_ref1 = Reference(ws, min_col=3, min_row=2, max_row=len(data) + 1)
     
     bar_chart1.add_data(bar_data_ref1, titles_from_data=True)
     bar_chart1.set_categories(categories_ref1)
 
     # Create a Line Chart (for Average Sales Per Day)
     line_chart1 = LineChart()
-    line_data_ref1 = Reference(ws, min_col=4, max_col=4, min_row=1, max_row=len(data) + 1)
+    line_data_ref1 = Reference(ws, min_col=6, max_col=6, min_row=1, max_row=len(data) + 1)
     line_chart1.add_data(line_data_ref1, titles_from_data=True)
+    line_chart1.set_categories(categories_ref1)
     line_chart1.y_axis.axId = 200  # Assign a new Y-axis for the line chart
     line_chart1.x_axis = bar_chart1.x_axis  # Share the same X-axis with the bar chart
     line_chart1.title = None  # No separate title for the line chart
-
+    line_chart1.width = 30
+    line_chart1.height = 15
+    line_chart1.style = 10
     # Combine the charts
     bar_chart1.y_axis.crosses = "autoZero"  # Keep bar chart Y-axis on the left
     bar_chart1 += line_chart1  # Add the line chart to the bar chart
 
     # Add the first chart to the worksheet
-    ws.add_chart(bar_chart1, "H3")
+    ws.add_chart(bar_chart1, "K3")
 
     # Chart 2: Total Quantity Sold and Average Books Sold Per Day
     # Create a Bar Chart (for Total Quantity Sold)
     bar_chart2 = BarChart()
     bar_chart2.type = "col"  # Clustered column chart
-    bar_chart2.title = "Total Quantity Sold and Average Books Sold Per Day"
-    bar_chart2.x_axis.title = "Events"
+    bar_chart2.title = "Total quantity sold and average books sold per day"
+    bar_chart2.x_axis.title = "Category sales at events"
     bar_chart2.y_axis.title = "Values"
+    bar_chart2.width = 30
+    bar_chart2.height = 15
+    bar_chart2.gapWidth = 500
+    bar_chart2.style = 10
     
     # Define data and categories for the Bar Chart
-    bar_data_ref2 = Reference(ws, min_col=3, max_col=3, min_row=1, max_row=len(data) + 1)
-    categories_ref2 = Reference(ws, min_col=1, min_row=2, max_row=len(data) + 1)
+    bar_data_ref2 = Reference(ws, min_col=5, max_col=5, min_row=1, max_row=len(data) + 1)
+    categories_ref2 = Reference(ws, min_col=3, min_row=2, max_row=len(data) + 1)
 
     bar_chart2.add_data(bar_data_ref2, titles_from_data=True)
     bar_chart2.set_categories(categories_ref2)
 
     # Create a Line Chart (for Average Books Sold Per Day)
     line_chart2 = LineChart()
-    line_data_ref2 = Reference(ws, min_col=5, max_col=5, min_row=1, max_row=len(data) + 1)
+    line_data_ref2 = Reference(ws, min_col=7, max_col=7, min_row=1, max_row=len(data) + 1)
     line_chart2.add_data(line_data_ref2, titles_from_data=True)
+    line_chart1.set_categories(categories_ref2)
     line_chart2.y_axis.axId = 300  # Assign a new Y-axis for the line chart
     line_chart2.x_axis = bar_chart2.x_axis  # Share the same X-axis with the bar chart
     line_chart2.title = None  # No separate title for the line chart
-
+    line_chart2.width = 30
+    line_chart2.height = 15
+    line_chart2.style = 10
     # Combine the charts
     bar_chart2.y_axis.crosses = "autoZero"  # Keep bar chart Y-axis on the left
     bar_chart2 += line_chart2  # Add the line chart to the bar chart
 
     # Add the second chart to the worksheet
-    ws.add_chart(bar_chart2, "H30")
+    ws.add_chart(bar_chart2, "K45")
 
     # Save the workbook
     wb.save(output_file)
     print(f"Excel file '{output_file}' with separate charts and duration created successfully!")
     return output_file
-def create_excel_with_stacked_chart(data, output_file):
-    try:
-        # Create a new workbook and select the active sheet
-        wb = Workbook()
-        ws = wb.active
-        ws.title = "Event Sales"
 
-        # Add headers
-        headers = [
-            "Event Name",
-            "Category Name",
-            "Start Date",
-            "End Date",
-            "Duration (Days)",
-            "Average Sales Per Day",
-            "Average Books Sold Per Day",
-            "Total Sales",
-            "Total Quantity Sold",
-            "Unique Books Sold",
-        ]
-        ws.append(headers)
-
-        # Add data to the sheet
-        for entry in data:
-            ws.append([
-                entry["event_name"],
-                entry["category_name"],
-                entry["start_date"],
-                entry["end_date"],
-                entry["duration"],
-                entry["average_sales_per_day"],
-                entry["average_books_sold_per_day"],
-                entry["total_sales"],
-                entry["total_quantity_sold"],
-                entry["unique_books_sold"],
-            ])
-
-        # Create a 100% stacked column chart
-        chart = BarChart()
-        chart.type = "col"  # Specifies a column chart
-        chart.grouping = "percentStacked"  # Sets the chart to 100% stacked mode
-        chart.title = "100% Stacked Event Sales Analysis"
-        chart.x_axis.title = "Events"
-        chart.y_axis.title = "Percentage Contribution"
-
-        # Define data for the chart
-        data_ref = Reference(ws, min_col=6, max_col=9, min_row=1, max_row=len(data) + 1)
-        categories_ref = Reference(ws, min_col=1, min_row=2, max_row=len(data) + 1)
-
-        chart.add_data(data_ref, titles_from_data=True)
-        chart.set_categories(categories_ref)
-        
-        chart.width = 25
-        chart.height = 15
-        chart.gapWidth = 300
-
-        # Position the chart on the sheet
-        ws.add_chart(chart, "L3")
-
-        # Save the workbook
-        wb.save(output_file)
-        print(f"Excel file '{output_file}' with 100% stacked chart created successfully!")
-        return output_file
-
-    except Exception as e:
-        print(f"Error while creating Excel file: {e}")
-        return None
-
-    except Exception as e:
-        print(f"An error occurred: {e}")
 
   
 if __name__ == "__main__":

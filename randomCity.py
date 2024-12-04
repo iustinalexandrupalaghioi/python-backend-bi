@@ -7,7 +7,7 @@ async def update_sales_with_random_cities():
     conn = await asyncpg.connect(
         user='postgres',
         password='postgres',
-        database='BookStore',
+        database='BookSales',
         host='localhost',  # Or your database host
         port='5432'        # Default PostgreSQL port
     )

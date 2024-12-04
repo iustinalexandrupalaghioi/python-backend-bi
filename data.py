@@ -22,7 +22,7 @@ fake = Faker()
 DB_CONFIG = {
     "user": "postgres",
     "password": "postgres",
-    "database": "BookStore",
+    "database": "BookSales",
     "host": "localhost",
     "port": 5432,
 }
@@ -44,11 +44,28 @@ AGE_GROUPS = [
 ]
 
 # Discounts and Events Data
-DISCOUNTS = [
-    {"name": "Summer Sale", "rate": 15.0, "start_date": "2024-06-01", "end_date": "2024-06-30"},
-    {"name": "Black Friday", "rate": 25.0, "start_date": "2024-11-25", "end_date": "2024-11-30"},
-    {"name": "New Year Discount", "rate": 10.0, "start_date": "2025-01-01", "end_date": "2025-01-07"},
-]
+# Function to generate discounts for each year
+DISCOUNTS = []
+for year in range(2010, 2024):
+    DISCOUNTS.append({
+        "name": "Summer Sale",  # Summer Sale name
+        "rate": 15.0,  # 15% discount rate
+        "start_date": f"{year}-06-01",
+        "end_date": f"{year}-06-30",
+    })
+    DISCOUNTS.append({
+        "name": "Black Friday",  # Black Friday name
+        "rate": 25.0,  # 25% discount rate
+        "start_date": f"{year}-11-25",
+        "end_date": f"{year}-11-30",
+    })
+    DISCOUNTS.append({
+        "name": "New Year Discount",  # New Year Discount name
+        "rate": 10.0,  # 10% discount rate
+        "start_date": f"{year + 1}-01-01",  # Starts in the following year
+        "end_date": f"{year + 1}-01-07",
+    })
+
 
 EVENTS = [
     {"name": "Book Fair", "start_date": "2024-03-01", "end_date": "2024-03-05", "event_type": "Exhibition", "description": "Annual book fair with authors and publishers."},
@@ -110,7 +127,7 @@ async def create_and_insert_data():
 
         # Insert books
         books = []
-        for _ in range(500):
+        for _ in range(3000):
             title = fake.sentence(nb_words=3).rstrip(".")
             author = fake.name()
             publication_year = random.randint(1990, 2024)
@@ -153,7 +170,7 @@ async def create_and_insert_data():
         # Insert sales
         start_date = date(2008, 1, 1)
         end_date = date(2024, 12, 31)
-        for _ in range(5000):
+        for _ in range(20000):
             book_id = random.choice(books)
             client_id = random.choice(clients)
             
