@@ -1006,6 +1006,104 @@ def create_separate_charts_with_duration(data, output_file):
     return output_file
 
 
+
+
+@app.get("/api/sales/cities")
+async def fetch_sales_by_city():
+    try:
+        logging.debug("Establishing database connection...")
+        connection = await asyncpg.connect(dsn=DB_URL)
+
+        # Parse query parameters
+        start_date = request.args.get("startDate")
+        end_date = request.args.get("endDate")
+        if not start_date or not end_date:
+            return {"error": "startDate and endDate are required."}, 400
+
+        try:
+            start_date = datetime.strptime(start_date, "%Y-%m-%d").date()
+            end_date = datetime.strptime(end_date, "%Y-%m-%d").date()
+            if start_date > end_date:
+                return {"error": "startDate must be before endDate."}, 400
+        except ValueError:
+            return {"error": "Invalid date format. Use YYYY-MM-DD."}, 400
+
+        # Query to fetch sales data grouped by city, gender, and age group
+        query = """
+            SELECT 
+                c.city_name,
+                c.latitude,
+                c.longitude,
+                SUM(s.total_price) AS total_sales,
+                COUNT(s.sale_id) AS transaction_count,
+                AVG(s.total_price) AS average_sale,
+                MIN(s.total_price) AS min_sale,
+                MAX(s.total_price) AS max_sale,
+                COALESCE(gender, 'Unknown') AS gender,
+                COALESCE(ag.age_group_name, 'Unknown') AS age_group,
+                COALESCE(ag.description, 'Unknown') AS age_group_description,
+                COUNT(*) AS group_count
+            FROM sales s
+            LEFT JOIN clients cl ON s.client_id = cl.client_id
+            LEFT JOIN age_groups ag ON cl.age_group_id = ag.age_group_id
+            LEFT JOIN cities c ON s.city_id = c.city_id
+            WHERE s.sale_date BETWEEN $1 AND $2
+            GROUP BY c.city_id, c.city_name, c.latitude, c.longitude, gender, ag.age_group_name, ag.description
+            ORDER BY c.city_name, gender, age_group;
+        """
+
+        # Fetch data
+        sales_data = await connection.fetch(query, start_date, end_date)
+
+        # Aggregate the data by city
+        city_data = {}
+        for row in sales_data:
+            city_name = row["city_name"]
+            if city_name not in city_data:
+                city_data[city_name] = {
+                    "latitude": row["latitude"],
+                    "longitude": row["longitude"],
+                    "total_sales": 0,
+                    "transaction_count": 0,
+                    "average_sale": 0,
+                    "min_sale": None,
+                    "max_sale": None,
+                    "gender_breakdown": {},
+                    "age_group_distribution": {}
+                }
+            city = city_data[city_name]
+
+            # Update overall city statistics
+            city["total_sales"] += row["total_sales"]
+            city["transaction_count"] += row["transaction_count"]
+            city["average_sale"] = city["total_sales"] / city["transaction_count"]
+            city["min_sale"] = min(filter(None, [city["min_sale"], row["min_sale"]]))
+            city["max_sale"] = max(filter(None, [city["max_sale"], row["max_sale"]]))
+
+            # Update gender breakdown
+            gender = row["gender"]
+            city["gender_breakdown"][gender] = city["gender_breakdown"].get(gender, 0) + row["group_count"]
+
+            # Update age group distribution
+            age_group = row["age_group"]
+            age_group_description = row["age_group_description"]
+            key = f"{age_group} ({age_group_description})"
+            city["age_group_distribution"][key] = city["age_group_distribution"].get(key, 0) + row["group_count"]
+
+        # Normalize percentages for gender and age group
+        for city in city_data.values():
+            total_count = city["transaction_count"]
+            city["gender_breakdown"] = {k: round((v / total_count) * 100, 2) for k, v in city["gender_breakdown"].items()}
+            city["age_group_distribution"] = {k: round((v / total_count) * 100, 2) for k, v in city["age_group_distribution"].items()}
+
+        return jsonify(city_data)
+
+    except Exception as e:
+        logging.error(f"Error: {e}")
+        return {"error": f"An error occurred while processing the request: {e}"}, 500
+
+    finally:
+        await connection.close()
   
 if __name__ == "__main__":
     app.run(debug=True)
