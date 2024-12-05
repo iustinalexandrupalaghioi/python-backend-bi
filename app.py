@@ -1007,7 +1007,7 @@ def create_separate_charts_with_duration(data, output_file):
 
 
 
-
+# API endpoint to fetch sales data grouped per city
 @app.get("/api/sales/cities")
 async def fetch_sales_by_city():
     try:
