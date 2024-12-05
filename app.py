@@ -1,4 +1,3 @@
-from xml.etree.ElementTree import tostring
 from flask import Flask, send_file, request, jsonify
 from flask_cors import CORS
 import asyncpg
@@ -8,7 +7,6 @@ import logging
 from datetime import datetime, timedelta
 from openpyxl import Workbook
 from openpyxl.chart import LineChart, BarChart, Reference
-from openpyxl.drawing.text import  ParagraphProperties, CharacterProperties
 from io import BytesIO
 import numpy as np
 from scipy.optimize import curve_fit
