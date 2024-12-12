@@ -809,6 +809,7 @@ async def export_event_sales_plot():
         start_date = request.args.get("startDate")
         end_date = request.args.get("endDate")
         category = request.args.get("category", None, type=int)
+        gender = request.args.get("gender", "All")
 
         # Ensure required parameters are present
         if not start_date or not end_date:
@@ -856,8 +857,12 @@ async def export_event_sales_plot():
         # Add category filter dynamically
         params = [start_date, end_date]
         if category and category != 0:
-            base_query += " AND cat.category_id = $3"
+            base_query += " AND cat.category_id = $" + str(len(params) + 1)
             params.append(category)
+            
+        if gender and gender != 'All':
+            base_query += " AND cl.gender = $" + str(len(params) + 1)
+            params.append(gender)
 
         # Group and order results
         base_query += """
@@ -1005,10 +1010,14 @@ def create_separate_charts_with_duration(data, output_file):
     # Add the second chart to the worksheet
     ws.add_chart(bar_chart2, "K45")
 
-    # Save the workbook
-    wb.save(output_file)
-    print(f"Excel file '{output_file}' with separate charts and duration created successfully!")
-    return output_file
+    
+    output = BytesIO()
+    wb.save(output)
+    output.seek(0)
+
+        
+    return output
+
 
 
 
