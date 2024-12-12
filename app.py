@@ -707,6 +707,7 @@ async def fetch_event_sales():
         start_date = request.args.get("startDate")
         end_date = request.args.get("endDate")
         category = request.args.get("category", None, type=int)
+        gender = request.args.get("gender", "All")
 
         # Ensure required parameters are present
         if not start_date or not end_date:
@@ -745,6 +746,7 @@ async def fetch_event_sales():
                 END AS average_books_sold_per_day
             FROM events e
             LEFT JOIN sales s ON s.event_id = e.event_id
+            INNER JOIN clients cl ON s.client_id = cl.client_id
             INNER JOIN books b ON b.book_id = s.book_id
             INNER JOIN subcategories sub ON b.subcategory_id = sub.subcategory_id
             LEFT JOIN categories cat ON sub.category_id = cat.category_id
@@ -754,8 +756,12 @@ async def fetch_event_sales():
         # Add category filter dynamically
         params = [start_date, end_date]
         if category and category != 0:
-            base_query += " AND cat.category_id = $3"
+            base_query += " AND cat.category_id = $" + str(len(params) + 1)
             params.append(category)
+            
+        if gender and gender != 'All':
+            base_query += " AND cl.gender = $" + str(len(params) + 1)
+            params.append(gender)
 
         # Group and order results
         base_query += """
