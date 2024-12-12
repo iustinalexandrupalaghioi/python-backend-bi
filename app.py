@@ -1,3 +1,4 @@
+from ast import And
 from flask import Flask, send_file, request, jsonify
 from flask_cors import CORS
 import asyncpg
@@ -1015,6 +1016,10 @@ async def fetch_sales_by_city():
         # Parse query parameters
         start_date = request.args.get("startDate")
         end_date = request.args.get("endDate")
+        gender = request.args.get("gender", "All")
+        age_min = request.args.get("ageMin", type=int)
+        age_max = request.args.get("ageMax", type=int)
+
         if not start_date or not end_date:
             return {"error": "startDate and endDate are required."}, 400
 
@@ -1026,7 +1031,7 @@ async def fetch_sales_by_city():
         except ValueError:
             return {"error": "Invalid date format. Use YYYY-MM-DD."}, 400
 
-        # Query to fetch sales data grouped by city, gender, and age group
+        # Base query
         query = """
             SELECT 
                 c.city_name,
@@ -1046,12 +1051,35 @@ async def fetch_sales_by_city():
             LEFT JOIN age_groups ag ON cl.age_group_id = ag.age_group_id
             LEFT JOIN cities c ON s.city_id = c.city_id
             WHERE s.sale_date BETWEEN $1 AND $2
-            GROUP BY c.city_id, c.city_name, c.latitude, c.longitude, gender, ag.age_group_name, ag.description
-            ORDER BY c.city_name, gender, age_group;
         """
 
+        # Add filters dynamically
+        conditions = []
+        params = [start_date, end_date]
+
+        if gender and gender != 'All':
+            conditions.append("cl.gender = $" + str(len(params) + 1))
+            params.append(gender)
+
+        if age_min is not None:
+            conditions.append("cl.age >= $" + str(len(params) + 1))
+            params.append(age_min)
+
+        if age_max is not None:
+            conditions.append("cl.age <= $" + str(len(params) + 1))
+            params.append(age_max)
+
+        if conditions:
+            query += " AND " + " AND ".join(conditions)
+
+        # Group by and order by clause
+        query += " GROUP BY c.city_id, c.city_name, c.latitude, c.longitude, gender, ag.age_group_name, ag.description "
+        query += " ORDER BY c.city_name, gender, age_group;"
+
+
+        logging.debug( params)
         # Fetch data
-        sales_data = await connection.fetch(query, start_date, end_date)
+        sales_data = await connection.fetch(query, *params)
 
         # Aggregate the data by city
         city_data = {}
@@ -1102,6 +1130,5 @@ async def fetch_sales_by_city():
 
     finally:
         await connection.close()
-  
 if __name__ == "__main__":
     app.run(debug=True)
