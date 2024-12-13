@@ -1034,6 +1034,7 @@ async def fetch_sales_by_city():
         gender = request.args.get("gender", "All")
         age_min = request.args.get("ageMin", type=int)
         age_max = request.args.get("ageMax", type=int)
+        category = request.args.get("category", "All")
 
         if not start_date or not end_date:
             return {"error": "startDate and endDate are required."}, 400
@@ -1065,6 +1066,11 @@ async def fetch_sales_by_city():
             LEFT JOIN clients cl ON s.client_id = cl.client_id
             LEFT JOIN age_groups ag ON cl.age_group_id = ag.age_group_id
             LEFT JOIN cities c ON s.city_id = c.city_id
+            INNER JOIN books b ON s.book_id = b.book_id 
+            INNER JOIN 
+            subcategories sub ON b.subcategory_id = sub.subcategory_id
+            INNER JOIN 
+            categories cat ON sub.category_id = cat.category_id
             WHERE s.sale_date BETWEEN $1 AND $2
         """
 
@@ -1083,6 +1089,11 @@ async def fetch_sales_by_city():
         if age_max is not None:
             conditions.append("cl.age <= $" + str(len(params) + 1))
             params.append(age_max)
+            
+        if category and category != 'All':
+            conditions.append("cat.category_id = $" + str(len(params) + 1))
+            params.append(int(category))
+
 
         if conditions:
             query += " AND " + " AND ".join(conditions)
