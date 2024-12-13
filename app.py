@@ -1156,5 +1156,7 @@ async def fetch_sales_by_city():
 
     finally:
         await connection.close()
+
+
 if __name__ == "__main__":
     app.run(debug=True)
